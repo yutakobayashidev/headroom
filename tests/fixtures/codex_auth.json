@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "active_account_key": "work",
+  "accounts": [
+    {
+      "account_key": "personal",
+      "active": false,
+      "alias": "personal",
+      "plan": "pro",
+      "usage": {
+        "source": "api",
+        "refresh": {
+          "status": "ok",
+          "method": "api",
+          "requested": true
+        },
+        "primary": {
+          "used_percent": 10,
+          "window_minutes": 300,
+          "resets_at": 1790010000
+        },
+        "secondary": {
+          "used_percent": 25,
+          "window_minutes": 10080,
+          "resets_at": 1790500000
+        },
+        "reset_credit": [
+          {
+            "status": "available",
+            "title": "Test credit",
+            "expires_at": 1790100000
+          }
+        ]
+      }
+    },
+    {
+      "account_key": "work",
+      "active": true,
+      "alias": "work",
+      "plan": "pro",
+      "usage": {
+        "source": "api",
+        "refresh": {
+          "status": "ok",
+          "method": "api",
+          "requested": true
+        },
+        "primary": {
+          "used_percent": 40,
+          "window_minutes": 300,
+          "resets_at": 1790010000
+        },
+        "secondary": {
+          "used_percent": 25,
+          "window_minutes": 10080,
+          "resets_at": 1790500000
+        },
+        "reset_credit": [
+          {
+            "status": "available",
+            "title": "Test credit",
+            "expires_at": 1790100000
+          }
+        ]
+      }
+    }
+  ]
+}

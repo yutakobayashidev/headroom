@@ -1,3 +1,4 @@
 .tools/
 tests/_generated/
 noctalia.d.luau
+__pycache__/

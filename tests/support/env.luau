@@ -1,5 +1,6 @@
 --!nonstrict
--- Shared fixtures for specs: a fresh fake host plus credential files.
+-- Shared setup for specs: a fake host with the plugin's assets, sign-ins to
+-- write into it, and scripted vendor endpoints.
 
 local sources = require("../_generated/sources")
 local hostLib = require("./host")
@@ -9,81 +10,91 @@ local M = {}
 
 M.sources = sources
 M.find = hostLib.find
-M.texts = hostLib.texts
 
-M.CLAUDE_CREDS = "/home/test/.claude/.credentials.json"
-M.CODEX_AUTH = "/home/test/.codex/auth.json"
+M.CLAUDE_HOME = "/home/test/.claude"
+M.CODEX_HOME = "/home/test/.codex"
 
 -- JWTs (alg none) whose exp is relative to the host's default clock 1_790_000_000.
 M.JWT_VALID = "eyJhbGciOiJub25lIn0.eyJleHAiOjE3OTAwMDM2MDB9.sig"
-M.JWT_EXPIRED = "eyJhbGciOiJub25lIn0.eyJleHAiOjE3ODk5OTAwMDB9.sig"
 M.JWT_ID_PRO = "eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9wbGFuX3R5cGUiOiJwcm8ifX0.sig"
 
--- A fresh host whose filesystem already holds the plugin's own assets
--- (plugin-relative paths, as Noctalia resolves them).
 function M.host()
   local host = hostLib.new(sources)
   for path, content in sources do
-    if path:match("%.svg$") then
+    if path:match("%.svg$") or path:match("%.py$") then
       host.files[path] = content
     end
   end
+  host.files["/plugin/plugin.toml"] = sources["plugin.toml"]
   return host
-end
-
--- A runtime for `entryPath` without running it (for requiring modules).
-function M.modules(host, entryPath: string?)
-  return loader.entry(sources, host, entryPath or "service.luau")
 end
 
 function M.start(host, entryPath: string)
   return loader.entry(sources, host, entryPath).start()
 end
 
+function M.modules(host)
+  return loader.entry(sources, host, "service.luau")
+end
+
 function M.fixture(name: string): string
   return assert(sources[`tests/fixtures/{name}`], `missing fixture {name}`)
 end
 
--- Claude Code's sign-in, in the default folder or in `home`.
-function M.claudeCreds(host, overrides, home: string?)
-  local oauth = {
-    accessToken = "claude-token",
-    expiresAt = (host.clock + 3600) * 1000,
-    subscriptionType = "team",
-    rateLimitTier = "default_claude_max_5x",
-  }
-  for k, v in overrides or {} do
-    oauth[k] = v
+function M.decode(host, text: string)
+  return host.globals.noctalia.json.decode(text)
+end
+
+local writes = 0
+
+-- Writes a file the way a CLI would: a new mtime each time.
+function M.write(host, path: string, value)
+  writes += 1
+  host.files[path] = if type(value) == "string" then value else host.globals.noctalia.json.encode(value)
+  host.mtimes[path] = host.clock + writes
+end
+
+-- Claude Code's sign-in in `home` (default: ~/.claude).
+function M.claudeCreds(host, token: string, home: string?)
+  M.write(host, `{home or M.CLAUDE_HOME}/.credentials.json`, {
+    claudeAiOauth = { accessToken = token, expiresAt = (host.clock + 3600) * 1000, subscriptionType = "max" },
+  })
+end
+
+-- The Claude endpoints. `accounts` maps an access token to the account it
+-- belongs to ("a" -> uuid "acct-a"); the profile endpoint answers from it, so
+-- identity follows the token, as it does at Anthropic.
+function M.serveClaude(host, accounts: { [string]: string }, usage: string?)
+  local json = host.globals.noctalia.json
+  host.httpHandler = function(req)
+    local token = M.headerOf(req, "Authorization"):match("Bearer (.+)")
+    if req.url:find("/api/oauth/profile", 1, true) then
+      local who = accounts[token]
+      local profile = json.decode(M.fixture("claude_profile.json"))
+      profile.account.uuid, profile.account.email = `acct-{who}`, `{who}@example.com`
+      return { ok = true, status = 200, body = json.encode(profile) }
+    end
+    local data = json.decode(usage or M.fixture("claude_usage.json"))
+    if req.url:find("cedar_ember=1", 1, true) then
+      data.cedar_ember = json.decode(M.fixture("claude_grants.json"))
+    end
+    return { ok = true, status = 200, body = json.encode(data) }
   end
-  local path = if home then `{home}/.credentials.json` else M.CLAUDE_CREDS
-  host.files[path] = host.globals.noctalia.json.encode({ claudeAiOauth = oauth })
 end
 
--- Claude Code's profile naming the signed-in account: ~/.claude.json for the
--- default folder, <home>/.claude.json for any other.
-function M.claudeProfile(host, accountUuid: string, home: string?)
-  local path = if home then `{home}/.claude.json` else "/home/test/.claude.json"
-  host.files[path] = host.globals.noctalia.json.encode({
-    oauthAccount = { accountUuid = accountUuid, organizationUuid = "org", emailAddress = `{accountUuid}@example.com` },
-  })
-end
-
-function M.codexAuth(host, tokens)
-  host.files[M.CODEX_AUTH] = host.globals.noctalia.json.encode({
+function M.codexAuth(host, accountId: string?)
+  M.write(host, `{M.CODEX_HOME}/auth.json`, {
     auth_mode = "chatgpt",
-    tokens = tokens or { access_token = M.JWT_VALID, id_token = M.JWT_ID_PRO, account_id = "acct-1" },
+    tokens = { access_token = M.JWT_VALID, id_token = M.JWT_ID_PRO, account_id = accountId or "acct-1" },
   })
 end
 
--- Routes requests by host to fixture bodies (or a custom status).
+-- Routes requests by URL substring to bodies (or full responses).
 function M.serve(host, routes)
   host.httpHandler = function(req)
     for needle, response in routes do
       if string.find(req.url, needle, 1, true) then
-        if type(response) == "string" then
-          return { ok = true, status = 200, body = response }
-        end
-        return response
+        return if type(response) == "string" then { ok = true, status = 200, body = response } else response
       end
     end
     return { ok = true, status = 404, body = "" }
@@ -100,56 +111,55 @@ function M.headerOf(req, name: string): string?
   return nil
 end
 
--- The Context the service builds for a provider's default account, over a
--- fake host. `account` ({ kind, home }) picks another account folder.
-function M.context(host, p, account)
-  local mods = M.modules(host)
-  local context = mods.require("lib/context.luau")
-  local base = context.new(host.globals.noctalia, "headroom-noctalia/test")
-  if p == nil or p.accounts == nil then
-    return base
-  end
-  local accounts = mods.require("lib/accounts.luau")
-  account = account or { kind = "default", home = accounts.defaultHome(p.accounts, base) }
-  return context.forAccount(base, p.accounts, account)
+-- Moves the clock and runs the service's tick.
+function M.advance(host, svc, seconds: number)
+  host.clock += seconds
+  svc.call("update")
 end
 
--- A fresh host, one provider adapter loaded in it, and its context.
+-- An account in the published report.
+function M.account(host, key: string)
+  for _, view in host.stateValues.report.providers do
+    for _, a in view.accounts do
+      if a.key == key then
+        return a
+      end
+    end
+  end
+  return nil
+end
+
+function M.requestsTo(host, needle: string): number
+  local n = 0
+  for _, req in host.requests do
+    if req.url:find(needle, 1, true) then
+      n += 1
+    end
+  end
+  return n
+end
+
+-- A provider adapter loaded in a fresh host, with the context the service
+-- would give its default account.
 function M.provider(id: string)
   local host = M.host()
-  local p = M.modules(host).require(`providers/{id}/init.luau`)
-  return host, p, M.context(host, p)
+  local mods = M.modules(host)
+  local p = mods.require(`providers/{id}/init.luau`)
+  local context = mods.require("lib/context.luau")
+  local accounts = mods.require("lib/accounts.luau")
+  local base = context.new(host.globals.noctalia, "headroom-noctalia/test")
+  local ctx = if p.accounts
+    then context.forAccount(base, p.accounts, { kind = "default", home = accounts.defaultHome(p.accounts, base) })
+    else base
+  return host, p, ctx
 end
 
--- Runs an adapter's fetch; returns (snapshot, err).
 function M.fetch(provider, ctx)
   local snapshot, err
   provider.fetch(ctx, function(s, e)
     snapshot, err = s, e
   end)
   return snapshot, err
-end
-
--- The Claude fixture with its session window at `sessionPercent`, as a body.
-function M.claudeBody(host, sessionPercent: number?, sessionResetsAt: string?): string
-  local json = host.globals.noctalia.json
-  local data = json.decode(M.fixture("claude_usage.json"))
-  data.limits[1].percent = sessionPercent or data.limits[1].percent
-  data.limits[1].resets_at = sessionResetsAt or data.limits[1].resets_at
-  return json.encode(data)
-end
-
-function M.byId(windows)
-  local out = {}
-  for _, w in windows do
-    out[w.id] = w
-  end
-  return out
-end
-
--- Nodes of one type in a ui tree.
-function M.ofType(tree, kind: string)
-  return M.find(tree, function(n) return n.type == kind end)
 end
 
 return M

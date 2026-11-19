@@ -26,6 +26,7 @@ function M.new(sources)
     config = {},
     env = {},
     files = {},
+    mtimes = {}, -- path -> mtime; set when a file is written through a helper
     dirs = {}, -- folders made with mkdirAll
     requests = {},
     httpHandler = nil, -- function(req) -> response | nil (nil = never answers)
@@ -88,6 +89,13 @@ function M.new(sources)
       return palette[role]
     end,
     tr = tr,
+    trp = function(key: string, count: number, subst)
+      local all = { count = count }
+      for k, v in subst or {} do
+        all[k] = v
+      end
+      return tr(`{key}.{if count == 1 then "one" else "other"}`, all)
+    end,
     readFile = function(path)
       local content = host.files[expand(path)]
       if content == nil then
@@ -110,6 +118,13 @@ function M.new(sources)
     end,
     fileExists = function(path)
       return host.files[expand(path)] ~= nil
+    end,
+    fileInfo = function(path)
+      local content = host.files[expand(path)]
+      if content == nil then
+        return nil, "not found"
+      end
+      return { size = #content, mtime = host.mtimes[expand(path)] or 0, isDir = false }
     end,
     mkdirAll = function(path)
       host.dirs[expand(path)] = true
@@ -138,6 +153,9 @@ function M.new(sources)
     end,
     pluginDataDir = function()
       return "/data", nil
+    end,
+    pluginDir = function()
+      return "/plugin"
     end,
     http = function(req, cb)
       table.insert(host.requests, req)
@@ -173,6 +191,7 @@ function M.new(sources)
       table.insert(host.toggledPanels, id)
     end,
     openSettings = function() end,
+    getSetting = function(name) return host.config[name] end,
     commandExists = function(name)
       return host.commands[name] == true
     end,
@@ -190,6 +209,9 @@ function M.new(sources)
     end,
     timeFormat = function()
       return "{:%H:%M}"
+    end,
+    dateFormat = function()
+      return "%a"
     end,
     -- UTC, enough of strftime for the patterns the plugin uses.
     formatTime = function(pattern, unix)
@@ -215,7 +237,11 @@ function M.new(sources)
       get = function(key)
         return host.stateValues[key]
       end,
+      -- Like the host: values cross entries as JSON, which refuses invalid UTF-8.
       set = function(key, value)
+        local text = json.encode(value)
+        assert(utf8.len(text) ~= nil, "noctalia.state.set: invalid UTF-8")
+        value = json.decode(text)
         host.stateValues[key] = value
         for _, fn in host.watchers[key] or {} do
           fn(value)
@@ -239,6 +265,12 @@ function M.new(sources)
   end
 
   host.globals = {
+    os = {
+      time = function(t)
+        return if t then os.time(t) else host.clock
+      end,
+    },
+    utf8 = utf8,
     noctalia = noctalia,
     ui = ui,
     barWidget = {

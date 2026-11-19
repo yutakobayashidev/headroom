@@ -1,424 +1,264 @@
 --!nonstrict
+-- The poller end to end, against a fake host: accounts, identity, failures,
+-- restarts.
+
 local t = require("./support/t")
 local env = require("./support/env")
 
--- An account in the published report, by key ("claude" is Claude's default).
-local function account(host, key)
-  for _, view in host.stateValues.report.providers do
-    for _, a in view.accounts do
-      if a.key == key then
-        return a
-      end
-    end
-  end
-  return nil
-end
+local WORK = "/home/test/.claude-work"
 
-local function signedInClaude(sessionPercent: number?)
-  local host = env.host()
-  env.claudeCreds(host)
-  env.serve(host, { ["api.anthropic.com"] = env.claudeBody(host, sessionPercent) })
-  return host
+local function claudeOnly(host)
+  host.config.provider_codex = "off"
+  host.config.provider_antigravity = "off"
 end
 
 t.group("service", function()
-  t.test("publishes a normalized report and never touches credentials", function()
-    local host = signedInClaude()
-    local creds = host.files[env.CLAUDE_CREDS]
-    local svc = env.start(host, "service.luau")
-    local claude = account(host, "claude")
-    t.eq(claude.status, "ok")
-    t.eq(#claude.snapshot.windows, 3)
-    t.ok(host.stateValues.report.providers[1].hint:find("claude", 1, true) ~= nil, "sign-in hint published")
-    t.eq(account(host, "codex").status, "absent")
-    t.eq(#host.requests, 1, "only signed-in providers are fetched")
-    host.clock += 3600
-    svc.call("update")
-    t.eq(host.files[env.CLAUDE_CREDS], creds)
-  end)
-
-  t.test("refetches when due, on the configured interval", function()
-    local host = signedInClaude()
-    host.config.refresh_minutes = 2
-    local svc = env.start(host, "service.luau")
-    host.clock += 60
-    svc.call("update")
-    t.eq(#host.requests, 1)
-    host.clock += 61
-    svc.call("update")
-    t.eq(#host.requests, 2)
-  end)
-
-  t.test("refresh via IPC; an in-flight request is not duplicated", function()
-    local host = signedInClaude()
-    local svc = env.start(host, "service.luau")
-    svc.call("onIpc", "refresh")
-    t.eq(#host.requests, 2)
-    host.httpHandler = nil -- never answers
-    svc.call("onIpc", "refresh")
-    svc.call("onIpc", "refresh")
-    t.eq(#host.requests, 3)
-    t.eq(account(host, "claude").busy, true)
-  end)
-
-  t.test("errors keep the last good snapshot, marked stale, with backoff", function()
-    local host = signedInClaude()
-    local svc = env.start(host, "service.luau")
-    env.serve(host, { ["api.anthropic.com"] = { ok = true, status = 503, body = "" } })
-    host.clock += 300
-    svc.call("update")
-    local claude = account(host, "claude")
-    t.eq(claude.status, "error")
-    t.eq(claude.stale, true)
-    t.eq(#claude.snapshot.windows, 3)
-    host.clock += 31 -- 30s backoff after the first failure, not the full interval
-    svc.call("update")
-    t.eq(#host.requests, 3)
-  end)
-
-  t.test("opening the panel refreshes old data but respects backoff", function()
-    local host = signedInClaude()
-    local svc = env.start(host, "service.luau")
-    local state = host.globals.noctalia.state
-    state.set("command", { action = "refresh", maxAge = 30 })
-    t.eq(#host.requests, 1, "fresh data: nothing to do")
-    host.clock += 120
-    state.set("command", { action = "refresh", maxAge = 30 })
-    t.eq(#host.requests, 2, "old data: refetched")
-
-    env.serve(host, { ["api.anthropic.com"] = { ok = true, status = 429, body = "" } })
-    svc.call("onIpc", "refresh")
-    t.eq(#host.requests, 3)
-    host.clock += 120
-    state.set("command", { action = "refresh", maxAge = 30 })
-    t.eq(#host.requests, 3, "throttled provider keeps its backoff")
-  end)
-
-  t.test("notices a sign-in that happens while running", function()
+  t.test("a folder switched to another account is not mistaken for a copy", function()
+    -- The bug: two folders, then a `/login` swap. Identity read from Claude
+    -- Code's profile file lagged the token, so one account showed twice.
     local host = env.host()
-    env.serve(host, { ["api.anthropic.com"] = env.fixture("claude_usage.json") })
+    claudeOnly(host)
+    env.claudeCreds(host, "tok-a")
+    env.claudeCreds(host, "tok-b", WORK)
+    env.serveClaude(host, { ["tok-a"] = "a", ["tok-b"] = "b", ["tok-a2"] = "a", ["tok-c"] = "c" })
     local svc = env.start(host, "service.luau")
-    t.eq(account(host, "claude").status, "absent")
-    env.claudeCreds(host)
-    host.clock += 30
-    svc.call("update")
-    t.eq(account(host, "claude").status, "ok")
+    t.eq(env.account(host, "claude").phase, "ready")
+    t.eq(env.account(host, `claude:{WORK}`).phase, "ready")
+
+    -- The work folder signs in to the default's account: now a copy, hidden.
+    env.claudeCreds(host, "tok-a2", WORK)
+    env.advance(host, svc, 30)
+    t.eq(env.account(host, `claude:{WORK}`), nil, "a found copy is left out")
+
+    -- And to a third account: shown again, with its own numbers.
+    env.claudeCreds(host, "tok-c", WORK)
+    env.advance(host, svc, 30)
+    local work = env.account(host, `claude:{WORK}`)
+    t.ok(work and work.duplicateOf == nil, "listed again")
+    t.eq(work.phase, "ready")
+    t.eq(work.email, "c@example.com")
   end)
 
-  t.test("serves the disk cache after a restart and refetches only when it is due", function()
-    local host = signedInClaude()
-    env.start(host, "service.luau")
-    local restarted = signedInClaude()
-    restarted.files["/data/cache.json"] = host.files["/data/cache.json"]
-    restarted.clock = host.clock + 60
-    local svc = env.start(restarted, "service.luau")
-    local claude = account(restarted, "claude")
-    t.eq(claude.status, "ok")
-    t.eq(claude.stale, true)
-    t.eq(#restarted.requests, 0, "data from a minute ago is not fetched again")
-    restarted.clock += 240
-    svc.call("update")
-    t.eq(#restarted.requests, 1, "fetched once its interval is over")
+  t.test("a found copy stays hidden across a restart", function()
+    -- After a restart no token is identified yet; the copy, fetched first
+    -- because its numbers are older, must not show up as a second account.
+    local host = env.host()
+    claudeOnly(host)
+    env.claudeCreds(host, "tok-a")
+    env.claudeCreds(host, "tok-a2", WORK)
+    env.serveClaude(host, { ["tok-a"] = "a", ["tok-a2"] = "a" })
+    local svc = env.start(host, "service.luau")
+    t.eq(env.account(host, `claude:{WORK}`), nil)
+    for _ = 1, 11 do
+      env.advance(host, svc, 30) -- the default is fetched again; the copy is not
+    end
+    host.watchers = {}
+    svc = env.start(host, "service.luau")
+    t.eq(env.account(host, `claude:{WORK}`), nil, "still a copy")
+    for _ = 1, 4 do
+      env.advance(host, svc, 30)
+    end
+    t.eq(env.account(host, `claude:{WORK}`), nil, "still a copy once both are known")
+    t.eq(env.account(host, "claude").phase, "ready")
   end)
 
-  t.test("a manual refresh doesn't retry a throttled account before its wait is over", function()
-    local host = signedInClaude()
+  t.test("numbers and alerts of the previous account go with it", function()
+    local host = env.host()
+    claudeOnly(host)
+    host.config.critical_percent = 90
+    env.claudeCreds(host, "tok-a")
+    local usage = env.decode(host, env.fixture("claude_usage.json"))
+    usage.limits[2].percent = 95
+    env.serveClaude(host, { ["tok-a"] = "a", ["tok-b"] = "b" }, host.globals.noctalia.json.encode(usage))
     local svc = env.start(host, "service.luau")
-    env.serve(host, { ["api.anthropic.com"] = { ok = true, status = 429, body = "" } })
-    svc.call("onIpc", "refresh")
-    t.eq(#host.requests, 2)
-    host.clock += 60
-    svc.call("onIpc", "refresh")
-    t.eq(#host.requests, 2, "still throttled: not asked again")
-    host.clock += 240
-    svc.call("onIpc", "refresh")
-    t.eq(#host.requests, 3, "the wait is over")
-  end)
+    t.eq(#host.notifications, 1, "running low")
 
-  t.test("notifies once when crossing the critical threshold", function()
-    local host = signedInClaude()
-    local svc = env.start(host, "service.luau")
-    env.serve(host, { ["api.anthropic.com"] = env.claudeBody(host, 93) })
-    host.clock += 300
-    svc.call("update")
-    host.clock += 300
-    svc.call("update")
+    -- `/login` as someone at 10%: no "has reset" for a reset that never happened.
+    usage.limits[2].percent = 10
+    env.serveClaude(host, { ["tok-a"] = "a", ["tok-b"] = "b" }, host.globals.noctalia.json.encode(usage))
+    env.claudeCreds(host, "tok-b")
+    env.advance(host, svc, 30)
     t.eq(#host.notifications, 1)
-    t.eq(host.notifications[1].title, "Claude usage is running low")
+    t.eq(env.account(host, "claude").email, "b@example.com")
   end)
 
-  t.test("providers set to off are neither fetched nor shown", function()
-    local host = signedInClaude()
-    env.codexAuth(host)
-    host.config.provider_codex = "off"
-    env.start(host, "service.luau")
-    t.eq(account(host, "codex"), nil)
-    t.eq(#host.requests, 1)
+  t.test("a request that never answers fails and backs off", function()
+    local host = env.host()
+    claudeOnly(host)
+    env.claudeCreds(host, "tok")
+    host.httpHandler = nil -- nothing ever answers
+    local svc = env.start(host, "service.luau")
+    t.ok(env.account(host, "claude").busy, "in flight")
+    for _ = 1, 21 do
+      env.advance(host, svc, 5)
+    end
+    local claude = env.account(host, "claude")
+    t.eq(claude.phase, "failing")
+    t.eq(claude.error.code, "network")
+    t.eq(claude.busy, false)
+    t.eq(#host.requests, 1, "not retried while it was out")
   end)
 
-  t.test("a crashing adapter is contained", function()
-    local host = signedInClaude()
-    env.codexAuth(host)
-    env.serve(host, {
-      ["api.anthropic.com"] = env.fixture("claude_usage.json"),
-      ["chatgpt.com"] = '{"rate_limit":{"primary_window":"boom"}}',
-    })
+  t.test("an adapter that throws on a reply fails visibly", function()
+    local host = env.host()
+    claudeOnly(host)
+    env.claudeCreds(host, "tok")
+    env.serve(host, { ["/oauth/profile"] = "{}", ["/oauth/usage"] = '{"limits": [{"kind": "session", "percent": 5, "resets_at": "2026-10-03T20:19:59Z"}]}' })
+    -- The date parser throws inside the reply.
+    host.globals.os.time = function(tbl)
+      if tbl then
+        error("boom")
+      end
+      return host.clock
+    end
     env.start(host, "service.luau")
-    t.eq(account(host, "claude").status, "ok")
-    t.eq(account(host, "codex").error.code, "parse")
+    local claude = env.account(host, "claude")
+    t.eq(claude.phase, "failing")
+    t.eq(claude.busy, false)
+  end)
+
+  t.test("a sign-in with nothing usable in it is not an error", function()
+    local host = env.host()
+    host.config.provider_claude = "off"
+    host.config.provider_antigravity = "off"
+    env.write(host, "/home/test/.codex/auth.json", { auth_mode = "apikey", OPENAI_API_KEY = "sk-x" })
+    env.start(host, "service.luau")
+    local codex = env.account(host, "codex")
+    t.eq(codex.phase, "signed_out")
+    t.eq(codex.error, nil)
+  end)
+
+  t.test("after a restart, recent numbers are reused and old owners are dropped", function()
+    local host = env.host()
+    claudeOnly(host)
+    env.claudeCreds(host, "tok-a")
+    env.serveClaude(host, { ["tok-a"] = "a", ["tok-b"] = "b" })
+    env.start(host, "service.luau")
+    t.eq(#host.requests, 2, "profile and usage")
+
+    host.clock += 60
+    host.requests, host.watchers = {}, {}
+    env.start(host, "service.luau")
+    t.eq(#host.requests, 0, "a minute-old fetch is still current")
+    t.eq(env.account(host, "claude").phase, "ready")
+
+    -- Restarted after a `/login` to another account: the cached numbers go
+    -- as soon as the new token's owner is known.
+    env.claudeCreds(host, "tok-b")
+    host.watchers = {}
+    local svc = env.start(host, "service.luau")
+    t.eq(env.account(host, "claude").email, "b@example.com")
+    t.eq(env.account(host, "claude").phase, "ready")
+    t.ok(svc, "started")
+  end)
+
+  t.test("a throttled account is not fetched early by a manual refresh", function()
+    local host = env.host()
+    claudeOnly(host)
+    env.claudeCreds(host, "tok")
+    env.serve(host, { ["/oauth/profile"] = "{}", ["/oauth/usage"] = { ok = true, status = 429, body = "" } })
+    local svc = env.start(host, "service.luau")
+    t.eq(env.account(host, "claude").error.code, "rate_limited")
+    local before = #host.requests
+    svc.call("onIpc", "refresh")
+    env.advance(host, svc, 60)
+    t.eq(#host.requests, before)
+  end)
+
+  t.test("a long account name is cut on a character boundary", function()
+    local host = env.host()
+    claudeOnly(host)
+    env.claudeCreds(host, "tok")
+    env.serveClaude(host, { tok = "a" })
+    env.start(host, "service.luau")
+    local name = string.rep("名", 40)
+    host.globals.noctalia.state.set("command", { action = "rename", key = "claude", label = name })
+    t.eq(utf8.len(env.account(host, "claude").name), 32)
   end)
 end)
 
-t.group("accounts", function()
-  local WORK = "/home/test/.claude-work"
-  local ADDED = "/data/accounts/claude/side"
-  local ADDED_PERSONAL = "/data/accounts/claude/personal"
-
-  -- Claude answers each account with its own session usage, picked by token.
-  local function serveByToken(host, percents)
-    host.httpHandler = function(req)
-      local token = (env.headerOf(req, "Authorization") or ""):gsub("^Bearer ", "")
-      local percent = percents[token]
-      if percent == nil then
-        return { ok = true, status = 401, body = "" }
-      end
-      return { ok = true, status = 200, body = env.claudeBody(host, percent) }
+t.group("managed Codex accounts", function()
+  local function setup()
+    local host = env.host()
+    host.config.provider_claude = "off"
+    host.config.provider_antigravity = "off"
+    host.config["provider_opencode-go"] = "off"
+    host.commands["codex-auth"] = true
+    local data = env.decode(host, env.fixture("codex_auth.json"))
+    host.runHandler = function(argv)
+      t.eq(table.concat(argv, " "), "codex-auth list --api --json")
+      return { exitCode = 0, stdout = host.globals.noctalia.json.encode(data) }
     end
+    return host, data
   end
-
-  local function sessionOf(view)
-    for _, w in view.snapshot.windows do
-      if w.id == "session" then
-        return w.usedPercent
-      end
-    end
-    return nil
-  end
-
-  local function claudeView(host)
-    return host.stateValues.report.providers[1]
-  end
-
-  t.test("a folder beside the default with a sign-in is another account, fetched with its own", function()
-    local host = env.host()
-    env.claudeCreds(host)
-    env.claudeCreds(host, { accessToken = "work-token" }, WORK)
-    host.dirs["/home/test/.claude-modmgr-dev"] = true -- no sign-in: not an account
-    serveByToken(host, { ["claude-token"] = 38, ["work-token"] = 88 })
-    env.start(host, "service.luau")
-
-    local accounts = claudeView(host).accounts
-    t.eq(#accounts, 2)
-    t.eq(accounts[1].kind, "default")
-    t.eq(sessionOf(accounts[1]), 38)
-    t.eq(accounts[2].kind, "found")
-    t.eq(accounts[2].label, "work")
-    t.eq(sessionOf(accounts[2]), 88)
-    t.eq(accounts[2].launch, "CLAUDE_CONFIG_DIR='/home/test/.claude-work' claude")
-  end)
-
-  t.test("notifications name the account when there are several", function()
-    local host = env.host()
-    env.claudeCreds(host)
-    env.claudeCreds(host, { accessToken = "work-token" }, WORK)
-    serveByToken(host, { ["claude-token"] = 38, ["work-token"] = 50 })
+  t.test("one batch, selection changes, removal, and no management commands", function()
+    local host, data = setup()
     local svc = env.start(host, "service.luau")
-    serveByToken(host, { ["claude-token"] = 38, ["work-token"] = 95 })
-    svc.call("onIpc", "refresh")
-    t.eq(#host.notifications, 1)
-    t.eq(host.notifications[1].title, "Claude · work usage is running low")
+    t.eq(#host.spawned, 1)
+    local work = env.account(host, "codex:work")
+    t.eq(work.phase, "ready")
+    t.eq(work.kind, "managed")
+    t.eq(work.canSignIn, false)
+    t.eq(work.launch, nil)
+    host.globals.noctalia.state.set("command", { action = "add", provider = "codex", label = "new" })
+    host.globals.noctalia.state.set("command", { action = "remove", key = "codex:work" })
+    host.globals.noctalia.state.set("command", { action = "sign_in", key = "codex:work" })
+    t.eq(#host.terminals, 0)
+    t.ok(env.account(host, "codex:work") ~= nil)
+    data.active_account_key = "personal"
+    data.accounts[1].active = true
+    data.accounts[2].active = false
+    env.advance(host, svc, 301)
+    t.eq(#host.spawned, 2)
+    local report = host.globals.noctalia.state.get("report")
+    t.eq(report.providers[1].accounts[1].key, "codex:personal")
+    t.eq(report.providers[1].canAdd, false)
+    table.remove(data.accounts, 2)
+    env.advance(host, svc, 301)
+    t.eq(env.account(host, "codex:work"), nil)
+    t.eq(env.account(host, "codex:personal").snapshot.windows[1].usedPercent, 10)
   end)
-
-  t.test("a copy of an account already shown is left out", function()
-    local host = env.host()
-    env.claudeCreds(host)
-    env.claudeProfile(host, "me")
-    env.claudeCreds(host, nil, WORK)
-    env.claudeProfile(host, "me", WORK)
-    env.claudeCreds(host, nil, "/home/test/.claude-other")
-    env.claudeProfile(host, "someone-else", "/home/test/.claude-other")
-    serveByToken(host, { ["claude-token"] = 38 })
-    env.start(host, "service.luau")
-    local accounts = claudeView(host).accounts
-    t.eq(#accounts, 2)
-    t.eq(accounts[2].label, "other")
-    t.eq(accounts[1].email, "me@example.com")
-  end)
-
-  t.test("adding one makes its folder and opens the CLI's login there, then picks up the sign-in", function()
-    local host = env.host()
-    host.commands["claude"] = true
-    env.claudeCreds(host)
-    serveByToken(host, { ["claude-token"] = 38, ["side-token"] = 12 })
+  t.test("partial auth failure preserves cached data as failing; empty inventory clears it", function()
+    local host, data = setup()
     local svc = env.start(host, "service.luau")
-    t.eq(claudeView(host).canAdd, true)
-
-    host.globals.noctalia.state.set("command", { action = "add", provider = "claude", label = "  Side  " })
-    t.ok(host.dirs[ADDED], "folder made under the data dir")
-    t.eq(#host.terminals, 1)
-    local login = host.terminals[1]
-    t.ok(login:find("'env' 'CLAUDE_CONFIG_DIR=/data/accounts/claude/side' 'claude' 'auth' 'login'", 1, true) ~= nil, login)
-    local added = claudeView(host).accounts[2]
-    t.eq(added.label, "Side")
-    t.eq(added.status, "absent")
-    t.eq(added.signingIn, true)
-
-    env.claudeCreds(host, { accessToken = "side-token" }, ADDED) -- the CLI finished signing in
-    host.clock += 5
-    svc.call("update")
-    added = claudeView(host).accounts[2]
-    t.eq(added.status, "ok")
-    t.eq(added.signingIn, false)
-    t.eq(sessionOf(added), 12)
+    data.accounts[2].usage.source = "cache"
+    data.accounts[2].usage.refresh = { status = "http_error", http_status = 401 }
+    env.advance(host, svc, 301)
+    local work = env.account(host, "codex:work")
+    t.eq(work.phase, "failing")
+    t.eq(work.error.code, "auth")
+    t.eq(work.snapshot.windows[1].usedPercent, 40)
+    t.eq(env.account(host, "codex:personal").phase, "ready")
+    data.accounts = {}
+    env.advance(host, svc, 301)
+    t.eq(env.account(host, "codex:work"), nil)
+    t.eq(env.account(host, "codex").phase, "signed_out")
   end)
-
-  t.test("added accounts survive a restart; removing one deletes its folder only", function()
-    local host = env.host()
-    host.commands["claude"] = true
-    env.claudeCreds(host)
-    serveByToken(host, { ["claude-token"] = 38 })
+  t.test("offline mode never starts the credential subprocess", function()
+    local host = setup()
+    host.config["shell.offline_mode"] = true
     env.start(host, "service.luau")
-    host.globals.noctalia.state.set("command", { action = "add", provider = "claude", label = "Side" })
-
-    local restarted = env.host()
-    restarted.files["/data/accounts.json"] = host.files["/data/accounts.json"]
-    env.claudeCreds(restarted)
-    serveByToken(restarted, { ["claude-token"] = 38 })
-    env.start(restarted, "service.luau")
-    local key = claudeView(restarted).accounts[2].key
-    t.eq(claudeView(restarted).accounts[2].label, "Side")
-
-    restarted.globals.noctalia.state.set("command", { action = "remove", key = key })
-    t.eq(table.concat(restarted.spawned[#restarted.spawned], " "), `rm -rf -- {ADDED}`)
-    t.eq(#claudeView(restarted).accounts, 1)
-    restarted.globals.noctalia.state.set("command", { action = "remove", key = "claude" })
-    t.eq(#claudeView(restarted).accounts, 1, "the default account can't be removed")
+    t.eq(#host.spawned, 0)
+    t.eq(env.account(host, "codex").phase, "failing")
   end)
-
-  t.test("removing a found account hides it and leaves its folder alone", function()
-    local host = env.host()
-    env.claudeCreds(host)
-    env.claudeCreds(host, { accessToken = "work-token" }, WORK)
-    serveByToken(host, { ["claude-token"] = 38, ["work-token"] = 88 })
-    env.start(host, "service.luau")
-    local spawnedBefore = #host.spawned
-    host.globals.noctalia.state.set("command", { action = "remove", key = claudeView(host).accounts[2].key })
-    t.eq(#claudeView(host).accounts, 1)
-    t.eq(#host.spawned, spawnedBefore, "nothing deleted")
-    t.ok(host.files[`{WORK}/.credentials.json`] ~= nil)
-
-    local restarted = env.host()
-    restarted.files = host.files
-    serveByToken(restarted, { ["claude-token"] = 38, ["work-token"] = 88 })
-    env.start(restarted, "service.luau")
-    t.eq(#claudeView(restarted).accounts, 1, "still hidden after a restart")
-  end)
-
-  t.test("signing the default in to an account already shown, from the CLI itself, is noticed", function()
-    local ADDED_WORK = "/data/accounts/claude/work"
-    local host = env.host()
-    host.commands["claude"] = true
-    env.claudeCreds(host)
-    env.claudeProfile(host, "me")
-    serveByToken(host, { ["claude-token"] = 38, ["side-token"] = 12 })
+  t.test("uninstalling codex-auth removes stale visible usage", function()
+    local host = setup()
     local svc = env.start(host, "service.luau")
-    host.globals.noctalia.state.set("command", { action = "add", provider = "claude", label = "Work" })
-    env.claudeCreds(host, { accessToken = "side-token" }, ADDED_WORK)
-    env.claudeProfile(host, "work", ADDED_WORK)
-    host.clock += 5
-    svc.call("update")
-    t.eq(claudeView(host).accounts[2].duplicateOf, nil)
-
-    -- `/login` in Claude Code, outside Headroom, as the Work account
-    env.claudeCreds(host, { accessToken = "side-token" })
-    env.claudeProfile(host, "work")
-    host.clock += 30
-    svc.call("update")
-    local view = claudeView(host)
-    t.eq(sessionOf(view.accounts[1]), 12, "the default shows the account it is signed in to now")
-    t.eq(view.accounts[1].label, "Work", "and is named after it")
-    t.eq(view.accounts[2].duplicateOf, "Work")
-
-    host.globals.noctalia.state.set("command", { action = "rename", key = "claude", label = "Job" })
-    view = claudeView(host)
-    t.eq(view.accounts[2].duplicateOf, "Job")
-    t.eq(view.accounts[2].label, "Work", "the duplicate keeps its folder's name, not the account's")
+    host.commands["codex-auth"] = nil
+    env.advance(host, svc, 31)
+    t.eq(env.account(host, "codex:work").phase, "signed_out")
+    t.eq(env.account(host, "codex:work").snapshot, nil)
   end)
-
-  t.test("a name given to a signed-in account follows it to another folder", function()
-    local host = env.host()
-    env.claudeCreds(host)
-    env.claudeProfile(host, "me")
-    env.claudeCreds(host, { accessToken = "work-token" }, WORK)
-    env.claudeProfile(host, "work", WORK)
-    serveByToken(host, { ["claude-token"] = 38, ["work-token"] = 88 })
+  t.test("failed discovery retains accounts and backs off", function()
+    local host = setup()
     local svc = env.start(host, "service.luau")
-    local state = host.globals.noctalia.state
-    state.set("command", { action = "rename", key = "claude", label = "Personal" })
-    state.set("command", { action = "rename", key = claudeView(host).accounts[2].key, label = "Job" })
-
-    -- `/login` in the default folder as the Job account, then back
-    env.claudeCreds(host, { accessToken = "work-token" })
-    env.claudeProfile(host, "work")
-    host.clock += 30
-    svc.call("update")
-    t.eq(claudeView(host).accounts[1].label, "Job")
-    env.claudeCreds(host)
-    env.claudeProfile(host, "me")
-    host.clock += 30
-    svc.call("update")
-    t.eq(claudeView(host).accounts[1].label, "Personal")
-  end)
-
-  t.test("an added account signed in to an account already shown is flagged, not fetched twice", function()
-    local host = env.host()
-    host.commands["claude"] = true
-    env.claudeCreds(host)
-    env.claudeProfile(host, "me")
-    serveByToken(host, { ["claude-token"] = 38, ["side-token"] = 12 })
-    local svc = env.start(host, "service.luau")
-    host.globals.noctalia.state.set("command", { action = "add", provider = "claude", label = "Personal" })
-    env.claudeCreds(host, { accessToken = "side-token" }, ADDED_PERSONAL)
-    env.claudeProfile(host, "me", ADDED_PERSONAL) -- same account as the default
-    host.clock += 5
-    svc.call("update")
-    local requests = #host.requests
-    local personal = claudeView(host).accounts[2]
-    t.eq(personal.duplicateOf, "Default")
-    t.eq(personal.snapshot, nil)
-
-    host.globals.noctalia.state.set("command", { action = "sign_in", key = personal.key })
-    env.claudeProfile(host, "someone-else", ADDED_PERSONAL) -- signed in again, as another account
-    host.clock += 5
-    svc.call("update")
-    host.clock += 5
-    svc.call("update")
-    personal = claudeView(host).accounts[2]
-    t.eq(personal.duplicateOf, nil)
-    t.eq(sessionOf(personal), 12)
-    t.eq(#host.requests, requests + 1, "fetched once it is its own account")
-  end)
-
-  t.test("accounts can be renamed, and the name sticks; an empty name gives back the usual one", function()
-    local host = env.host()
-    env.claudeCreds(host)
-    env.claudeCreds(host, { accessToken = "work-token" }, WORK)
-    serveByToken(host, { ["claude-token"] = 38, ["work-token"] = 88 })
-    env.start(host, "service.luau")
-    local state = host.globals.noctalia.state
-    state.set("command", { action = "rename", key = "claude", label = "  Personal " })
-    state.set("command", { action = "rename", key = claudeView(host).accounts[2].key, label = "Job" })
-    t.eq(claudeView(host).accounts[1].label, "Personal")
-    t.eq(claudeView(host).accounts[2].label, "Job")
-
-    local restarted = env.host()
-    restarted.files = host.files
-    serveByToken(restarted, { ["claude-token"] = 38, ["work-token"] = 88 })
-    env.start(restarted, "service.luau")
-    t.eq(claudeView(restarted).accounts[1].label, "Personal")
-    restarted.globals.noctalia.state.set("command", { action = "rename", key = claudeView(restarted).accounts[2].key, label = "" })
-    t.eq(claudeView(restarted).accounts[2].label, "work", "back to the folder's name")
+    host.runHandler = function() return { exitCode = 1, stdout = "secret upstream error" } end
+    env.advance(host, svc, 301)
+    t.eq(env.account(host, "codex:work").phase, "failing")
+    local count = #host.spawned
+    env.advance(host, svc, 5)
+    t.eq(#host.spawned, count)
   end)
 end)
 
-return true
+return nil

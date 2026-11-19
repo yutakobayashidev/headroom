@@ -12,7 +12,7 @@
 
 id = "yutakobayashidev/headroom"
 name = "Headroom"
-version = "0.4.0"
+version = "0.4.1"
 plugin_api = 43
 author = "yutakobayashidev"
 license = "MIT"
@@ -203,7 +203,7 @@ entry = "bar.luau"
 [[panel]]
 id = "panel"
 entry = "panel.luau"
-width = 420
+width = 840
 height = "content"
 max_height = 640
 placement = "attached"

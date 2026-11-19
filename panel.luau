@@ -174,7 +174,21 @@ function render()
     end
   end
 
-  local content = if #connected == 0 then { cards.emptyState() } else connected
+  -- Two equal-width cards per row. Keep the final odd card at the same
+  -- width instead of stretching it across the panel.
+  local content = {}
+  for i = 1, #connected, 2 do
+    local cells = {
+      ui.column({ width = 0, flexGrow = 1 }, { connected[i] }),
+      if connected[i + 1]
+        then ui.column({ width = 0, flexGrow = 1 }, { connected[i + 1] })
+        else ui.spacer({ width = 0, flexGrow = 1 }),
+    }
+    table.insert(content, ui.row({ gap = 12, align = "start" }, cells))
+  end
+  if #connected == 0 then
+    table.insert(content, cards.emptyState())
+  end
   if #disconnected > 0 then
     table.insert(content, ui.column({ gap = 8, key = "disconnected" }, disconnected))
   end

@@ -49,6 +49,12 @@ is absent. HTTP 404 or a missing Console `access` is shown as no plan.
 Live OAuth success has not been verified on the development machine, which has no
 active OpenCode 2 login. Parsing and authentication behavior are fixture-tested.
 
+## Panel layout
+
+Provider cards use two equal-width columns and wrap onto another row.
+An odd final card keeps its column width. The panel is 840 logical pixels wide
+and scrolls vertically when accounts or provider details exceed its height.
+
 ## Other providers and display
 
 Claude and Antigravity retain upstream's adapters. Claude can still manage its

@@ -83,7 +83,7 @@ end
 return provider.define({
   id = "codex", name = "Codex",
   brand = { glyph = "brand-openai",
-    dashboard = "https://chatgpt.com/codex/settings/usage" },
+    dashboard = "https://chatgpt.com/settings/usage?tab=overview" },
   isConfigured = function(ctx) return ctx.which("codex-auth") end,
   signInHint = function(ctx) return ctx.tr("providers.codex.hint") end,
   fetchAccounts = function(ctx, done)

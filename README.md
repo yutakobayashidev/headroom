@@ -59,16 +59,20 @@ not substituted for the Vibe allowance. Calendar months have no fixed pacing per
 
 The Python helper reads `MISTRAL_API_KEY`, then the existing Vibe Secret Service
 keyring (`ai.mistral.vibe`, legacy `vibe`, via `secret-tool`), then
-`${VIBE_HOME:-~/.vibe}/.env`. Sign in through Vibe first. No browser cookies,
-credential copies, token refresh, or keys in process arguments/cache are used.
-Only the official API host receives the key; redirects are refused.
-OIDC-only sign-ins and custom API hosts are not supported by this adapter.
+`${VIBE_HOME:-~/.vibe}/.env`. Sign in through Vibe first; its browser sign-in
+stores an API key in the keyring, so `secret-tool` (libsecret) must be on
+Noctalia's PATH. No browser cookies, credential copies, token refresh, or keys
+in process arguments/cache are used. Only the official API host receives the
+key; redirects are refused. OIDC sessions (`VIBE_CLI_OIDC_ENABLED`) store only the
+non-secret `vibe-cli-oidc` marker as the key; Headroom skips it and reports no
+sign-in. Custom API hosts are not supported by this adapter.
 
 The key must have `see_org_inference_usage`. HTTP 401/403 is an auth/permission
 error, 429 backs off, and a missing allowance is reported as no plan. A malformed
 response is never displayed as zero usage. Reset time may be absent.
-The development host has no Vibe key: live account usage is unverified; the
-API schema, credentials, errors and UI adapter are covered by fixtures/mocks.
+Verified with a live Vibe 3.1.2 browser sign-in: the helper's percentage and reset
+matched Vibe's own billing client. Errors and the UI adapter are covered by
+fixtures/mocks.
 
 ## Panel layout
 
@@ -97,7 +101,7 @@ noctalia msg plugins enable yutakobayashidev/headroom
 
 Replace the bar widget ID with `yutakobayashidev/headroom:usage` in Noctalia settings.
 The plugin requires API 43. Its dependencies must be on Noctalia's PATH:
-`codex-auth` for Codex, `python3` for Go and Mistral, plus the optional upstream helpers
+`codex-auth` for Codex, `python3` for Go and Mistral (`secret-tool` for a keyring key), plus the optional upstream helpers
 `xdg-open`, `secret-tool`, `claude`, `agy`, `env`, and `rm`.
 
 Refresh with:

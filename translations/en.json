@@ -142,7 +142,7 @@
       "monthly": "Monthly"
     },
     "mistral": {
-      "hint": "Sign in with Vibe. Uses MISTRAL_API_KEY, the Vibe system keyring, or $VIBE_HOME/.env (default ~/.vibe/.env). Billing access requires see_org_inference_usage. Python 3 is required.",
+      "hint": "Sign in with Vibe using an API key or browser sign-in; OIDC sessions are not supported. Uses MISTRAL_API_KEY, the Vibe system keyring (needs secret-tool), or $VIBE_HOME/.env (default ~/.vibe/.env). Billing access requires see_org_inference_usage. Python 3 is required.",
       "monthly": "Monthly · Vibe Code"
     }
   },

@@ -14,6 +14,9 @@ import urllib.error
 import urllib.request
 
 SERVER = "https://api.mistral.ai/v1"
+# Vibe's non-secret stand-in for an OIDC session (vibe/utils/oidc_marker.py).
+# The API rejects it, so it never counts as a key.
+OIDC_MARKER = "vibe-cli-oidc"
 
 class Failure(Exception):
     def __init__(self, code):
@@ -23,8 +26,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
+def usable(token):
+    token = token.strip()
+    return "" if token == OIDC_MARKER else token
+
 def credential():
-    token = os.environ.get("MISTRAL_API_KEY", "").strip()
+    token = usable(os.environ.get("MISTRAL_API_KEY", ""))
     if token:
         return token
     # Python keyring's SecretService attributes, including Vibe's legacy service.
@@ -35,8 +42,9 @@ def credential():
                 capture_output=True, text=True, timeout=3, check=False)
         except (OSError, subprocess.TimeoutExpired):
             continue
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
+        token = usable(result.stdout) if result.returncode == 0 else ""
+        if token:
+            return token
     path = Path(os.environ.get("VIBE_HOME", "~/.vibe")).expanduser() / ".env"
     try:
         content = path.read_text()
@@ -58,6 +66,7 @@ def credential():
             else:
                 value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
             token = value
+    token = usable(token)
     if not token:
         raise Failure("not_configured")
     return token

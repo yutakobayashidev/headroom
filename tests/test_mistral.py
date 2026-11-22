@@ -60,6 +60,17 @@ class MistralTest(unittest.TestCase):
             path.write_text('OTHER_KEY=synthetic')
             self.failure('not_configured', m.credential)
 
+    def test_oidc_marker_is_not_a_key(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'MISTRAL_API_KEY': m.OIDC_MARKER, 'VIBE_HOME': tmp}, clear=True), patch.object(m.subprocess, 'run') as run:
+            # The marker in the environment falls through to both keyring services.
+            run.return_value = Mock(returncode=0, stdout=m.OIDC_MARKER + '\n')
+            self.failure('not_configured', m.credential)
+            self.assertEqual(run.call_count, 2)
+            (Path(tmp) / '.env').write_text('MISTRAL_API_KEY=' + m.OIDC_MARKER)
+            self.failure('not_configured', m.credential)
+            run.return_value = Mock(returncode=0, stdout='synthetic\n')
+            self.assertEqual(m.credential(), 'synthetic')
+
     def test_request_and_http_failures(self):
         with patch.object(m, 'credential', return_value='synthetic'):
             opener = Mock()

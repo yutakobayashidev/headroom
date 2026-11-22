@@ -12,12 +12,12 @@
 
 id = "yutakobayashidev/headroom"
 name = "Headroom"
-version = "0.4.1"
+version = "0.5.0"
 plugin_api = 43
 author = "yutakobayashidev"
 license = "MIT"
 icon = "gauge"
-description = "Codex accounts from codex-auth and OpenCode Go sessions, plus Claude and Antigravity usage."
+description = "Codex accounts from codex-auth and OpenCode Go sessions, plus Mistral Vibe, Claude and Antigravity usage."
 tags = ["bar", "panel", "service", "ai", "indicator", "productivity"]
 # All optional: each powers one feature listed in the README's Requirements,
 # and that feature is skipped when the tool is missing.
@@ -59,6 +59,18 @@ options = [
 key = "provider_opencode-go"
 type = "select"
 label_key = "settings.provider_opencode-go.label"
+description_key = "settings.provider.description"
+default = "bar"
+options = [
+  { value = "bar", label_key = "settings.provider.option.bar" },
+  { value = "panel", label_key = "settings.provider.option.panel" },
+  { value = "off", label_key = "settings.provider.option.off" },
+]
+
+[[setting]]
+key = "provider_mistral"
+type = "select"
+label_key = "settings.provider_mistral.label"
 description_key = "settings.provider.description"
 default = "bar"
 options = [

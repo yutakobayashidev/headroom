@@ -7,5 +7,6 @@ return {
   require("./claude/init.luau"),
   require("./codex/init.luau"),
   require("./opencode-go/init.luau"),
+  require("./mistral/init.luau"),
   require("./antigravity/init.luau"),
 }

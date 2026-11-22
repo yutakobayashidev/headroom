@@ -261,4 +261,30 @@ t.group("managed Codex accounts", function()
   end)
 end)
 
+t.group("Mistral service", function()
+  t.test("publishes monthly usage and retains it as stale on denied access", function()
+    local host = env.host()
+    for _, id in { "claude", "codex", "opencode-go", "antigravity" } do
+      host.config[`provider_{id}`] = "off"
+    end
+    host.commands.python3 = true
+    local data = { usedPercent = 42.5, resetsAt = host.clock + 10000 }
+    host.runHandler = function(argv)
+      t.eq(argv[1], "python3")
+      t.eq(argv[2], "-c")
+      return { exitCode = 0, stdout = host.globals.noctalia.json.encode(data) }
+    end
+    local svc = env.start(host, "service.luau")
+    local account = env.account(host, "mistral")
+    t.eq(account.phase, "ready")
+    t.eq(account.snapshot.windows[1].usedPercent, 42.5)
+    data = { error = "auth" }
+    env.advance(host, svc, 301)
+    account = env.account(host, "mistral")
+    t.eq(account.phase, "failing")
+    t.eq(account.error.code, "auth")
+    t.eq(account.snapshot.windows[1].usedPercent, 42.5)
+  end)
+end)
+
 return nil

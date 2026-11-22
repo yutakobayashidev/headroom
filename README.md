@@ -49,6 +49,27 @@ is absent. HTTP 404 or a missing Console `access` is shown as no plan.
 Live OAuth success has not been verified on the development machine, which has no
 active OpenCode 2 login. Parsing and authentication behavior are fixture-tested.
 
+## Mistral Vibe
+
+The monthly **Vibe Code subscription allowance** is read from
+`GET https://api.mistral.ai/v1/billing/budget`, matching
+[Vibe's billing client](https://github.com/mistralai/mistral-vibe/blob/main/vibe/app_server/_billing.py).
+The bar/panel show `vibe_budget.usage_percentage` and `reset_at`; API spending is
+not substituted for the Vibe allowance. Calendar months have no fixed pacing period.
+
+The Python helper reads `MISTRAL_API_KEY`, then the existing Vibe Secret Service
+keyring (`ai.mistral.vibe`, legacy `vibe`, via `secret-tool`), then
+`${VIBE_HOME:-~/.vibe}/.env`. Sign in through Vibe first. No browser cookies,
+credential copies, token refresh, or keys in process arguments/cache are used.
+Only the official API host receives the key; redirects are refused.
+OIDC-only sign-ins and custom API hosts are not supported by this adapter.
+
+The key must have `see_org_inference_usage`. HTTP 401/403 is an auth/permission
+error, 429 backs off, and a missing allowance is reported as no plan. A malformed
+response is never displayed as zero usage. Reset time may be absent.
+The development host has no Vibe key: live account usage is unverified; the
+API schema, credentials, errors and UI adapter are covered by fixtures/mocks.
+
 ## Panel layout
 
 Provider cards use two equal-width columns and wrap onto another row.
@@ -76,7 +97,7 @@ noctalia msg plugins enable yutakobayashidev/headroom
 
 Replace the bar widget ID with `yutakobayashidev/headroom:usage` in Noctalia settings.
 The plugin requires API 43. Its dependencies must be on Noctalia's PATH:
-`codex-auth` for Codex, `python3` for Go, plus the optional upstream helpers
+`codex-auth` for Codex, `python3` for Go and Mistral, plus the optional upstream helpers
 `xdg-open`, `secret-tool`, `claude`, `agy`, `env`, and `rm`.
 
 Refresh with:
@@ -89,6 +110,7 @@ noctalia msg plugin yutakobayashidev/headroom:poller all refresh
 
 - `codex-auth list --api --json` owns Codex API access and its existing usage cache.
 - `python3 -c <bundled helper>` reads OpenCode's DB and requests Console Go status.
+- Mistral reads the existing Vibe key and requests its monthly billing budget.
 - Claude reads its `.credentials.json` and can invoke its CLI to renew/login.
 - Antigravity reads its existing keyring/token file and can invoke `agy` to renew.
 - `xdg-open` opens a vendor dashboard. `env` and `rm` are only for Claude's existing

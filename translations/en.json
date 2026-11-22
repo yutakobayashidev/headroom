@@ -140,6 +140,10 @@
     "opencode-go": {
       "hint": "Sign in with opencode auth login opencode. OpenCode owns session renewal; Python 3 is required to read its session.",
       "monthly": "Monthly"
+    },
+    "mistral": {
+      "hint": "Sign in with Vibe. Uses MISTRAL_API_KEY, the Vibe system keyring, or $VIBE_HOME/.env (default ~/.vibe/.env). Billing access requires see_org_inference_usage. Python 3 is required.",
+      "monthly": "Monthly · Vibe Code"
     }
   },
   "reset": {
@@ -237,6 +241,9 @@
     },
     "provider_opencode-go": {
       "label": "Providers · OpenCode Go"
+    },
+    "provider_mistral": {
+      "label": "Mistral Vibe"
     }
   },
   "status": {

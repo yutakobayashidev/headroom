@@ -139,4 +139,26 @@ t.group("antigravity", function()
   end)
 end)
 
+
+t.group("Mistral", function()
+  t.test("monthly usage has reset but no assumed month duration", function()
+    local host, p, ctx = env.provider("mistral")
+    local snapshot, err = p.parse({ usedPercent = 42.5, resetsAt = host.clock + 1000 }, ctx)
+    t.eq(err, nil)
+    t.eq(snapshot.windows[1].usedPercent, 42.5)
+    t.eq(snapshot.windows[1].label, "Monthly · Vibe Code")
+    t.eq(snapshot.windows[1].periodSeconds, nil)
+    t.eq(snapshot.windows[1].resetsAt, host.clock + 1000)
+    t.eq(p.parse({ usedPercent = 0 }, ctx).windows[1].resetsAt, nil)
+    for _, code in { "auth", "rate_limited", "no_plan", "not_configured" } do
+      local _, failure = p.parse({ error = code }, ctx)
+      t.eq(failure.code, code)
+    end
+    for _, data in { {}, { usedPercent = "42" }, { usedPercent = -1 }, { error = "unknown" } } do
+      local _, failure = p.parse(data, ctx)
+      t.eq(failure.code, "parse")
+    end
+  end)
+end)
+
 return nil
